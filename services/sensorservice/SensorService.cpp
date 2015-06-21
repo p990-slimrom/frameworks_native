@@ -83,6 +83,8 @@ void SensorService::onFirstRef()
         if (count > 0) {
             ssize_t orientationIndex = -1;
             bool hasGyro = false;
+            bool hasMagnetometer = false;
+            bool hasAccelerometer = false;
             uint32_t virtualSensorsNeeds =
                     (1<<SENSOR_TYPE_GRAVITY) |
                     (1<<SENSOR_TYPE_LINEAR_ACCELERATION) |
@@ -98,6 +100,12 @@ void SensorService::onFirstRef()
                     case SENSOR_TYPE_GYROSCOPE:
                     case SENSOR_TYPE_GYROSCOPE_UNCALIBRATED:
                         hasGyro = true;
+                        break;
+                    case SENSOR_TYPE_MAGNETIC_FIELD:
+                        hasMagnetometer = true;
+                        break;
+                    case SENSOR_TYPE_ACCELEROMETER:
+                        hasAccelerometer = true;
                         break;
                     case SENSOR_TYPE_GRAVITY:
                     case SENSOR_TYPE_LINEAR_ACCELERATION:
@@ -115,7 +123,7 @@ void SensorService::onFirstRef()
             // build the sensor list returned to users
             mUserSensorList = mSensorList;
 
-            if (hasGyro) {
+            if (hasGyro && hasMagnetometer && hasAccelerometer) {
                 Sensor aSensor;
 
                 // Add Android virtual sensors if they're not already
@@ -138,9 +146,10 @@ void SensorService::onFirstRef()
 
                 aSensor = registerVirtualSensor( new OrientationSensor() );
                 if (virtualSensorsNeeds & (1<<SENSOR_TYPE_ROTATION_VECTOR)) {
-                    // if we are doing our own rotation-vector, also add
-                    // the orientation sensor and remove the HAL provided one.
-                    mUserSensorList.replaceAt(aSensor, orientationIndex);
+                    if (orientationIndex == -1) {
+                        // some sensor HALs don't provide an orientation sensor.
+                        mUserSensorList.add(aSensor);
+                    }
                 }
 
                 // virtual debugging sensors are not added to mUserSensorList
@@ -782,15 +791,18 @@ status_t SensorService::enable(const sp<SensorEventConnection>& connection,
     // Call flush() before calling activate() on the sensor. Wait for a first flush complete
     // event before sending events on this connection. Ignore one-shot sensors which don't
     // support flush(). Also if this sensor isn't already active, don't call flush().
+    const SensorDevice& device(SensorDevice::getInstance());
     if (err == NO_ERROR && sensor->getSensor().getReportingMode() != AREPORTING_MODE_ONE_SHOT &&
             rec->getNumConnections() > 1) {
-        connection->setFirstFlushPending(handle, true);
-        status_t err_flush = sensor->flush(connection.get(), handle);
-        // Flush may return error if the underlying h/w sensor uses an older HAL.
-        if (err_flush == NO_ERROR) {
-            rec->addPendingFlushConnection(connection.get());
-        } else {
-            connection->setFirstFlushPending(handle, false);
+        if (device.getHalDeviceVersion() >= SENSORS_DEVICE_API_VERSION_1_1) {
+            connection->setFirstFlushPending(handle, true);
+            status_t err_flush = sensor->flush(connection.get(), handle);
+            // Flush may return error if the underlying h/w sensor uses an older HAL.
+            if (err_flush == NO_ERROR) {
+                rec->addPendingFlushConnection(connection.get());
+            } else {
+                connection->setFirstFlushPending(handle, false);
+            }
         }
     }
 
@@ -801,6 +813,11 @@ status_t SensorService::enable(const sp<SensorEventConnection>& connection,
 
     if (err == NO_ERROR) {
         connection->updateLooperRegistration(mLooper);
+    }
+
+    if (device.getHalDeviceVersion() < SENSORS_DEVICE_API_VERSION_1_1) {
+        // Pre-1.1 sensor HALs had no flush method, and relied on setDelay at init
+        sensor->setDelay(connection.get(), handle, samplingPeriodNs);
     }
 
     if (err != NO_ERROR) {

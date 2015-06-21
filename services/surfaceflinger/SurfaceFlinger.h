@@ -42,6 +42,7 @@
 
 #include <gui/ISurfaceComposer.h>
 #include <gui/ISurfaceComposerClient.h>
+#include <gui/BufferQueue.h>
 
 #include <hardware/hwcomposer_defs.h>
 
@@ -56,6 +57,8 @@
 #include "DisplayHardware/HWComposer.h"
 #include "Effects/Daltonizer.h"
 
+#include "FrameRateHelper.h"
+
 namespace android {
 
 // ---------------------------------------------------------------------------
@@ -66,6 +69,7 @@ class EventThread;
 class IGraphicBufferAlloc;
 class Layer;
 class LayerDim;
+class LayerBlur;
 class Surface;
 class RenderEngine;
 class EventControlThread;
@@ -97,7 +101,8 @@ public:
     void run() ANDROID_API;
 
     enum {
-        EVENT_VSYNC = HWC_EVENT_VSYNC
+        EVENT_VSYNC = HWC_EVENT_VSYNC,
+        EVENT_ORIENTATION = HWC_EVENT_ORIENTATION
     };
 
     // post an asynchronous message to the main thread
@@ -133,12 +138,18 @@ public:
     RenderEngine& getRenderEngine() const {
         return *mRenderEngine;
     }
-
+#ifdef QCOM_BSP
+    // Extended Mode - No video on primary and it will be shown full
+    // screen on External
+    static bool sExtendedMode;
+    static bool isExtendedMode() { return sExtendedMode; };
+#endif
 private:
     friend class Client;
     friend class DisplayEventConnection;
     friend class Layer;
     friend class MonitoredProducer;
+    friend class LayerBlur;
 
     // This value is specified in number of frames.  Log frame stats at most
     // every half hour.
@@ -207,6 +218,13 @@ private:
             uint32_t minLayerZ, uint32_t maxLayerZ,
             bool useIdentityTransform, ISurfaceComposer::Rotation rotation,
             bool isCpuConsumer);
+#ifdef USE_MHEAP_SCREENSHOT
+    virtual status_t captureScreen(const sp<IBinder>& display, sp<IMemoryHeap>* heap,
+            uint32_t* width, uint32_t* height,
+            Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+            uint32_t minLayerZ, uint32_t maxLayerZ,
+            bool useIdentityTransform, ISurfaceComposer::Rotation rotation);
+#endif
     virtual status_t getDisplayStats(const sp<IBinder>& display,
             DisplayStatInfo* stats);
     virtual status_t getDisplayConfigs(const sp<IBinder>& display,
@@ -261,6 +279,19 @@ private:
 
     void updateCursorAsync();
 
+    // Read virtual display properties
+    void setVirtualDisplayData( int32_t hwcDisplayId,
+                                const sp<IGraphicBufferProducer>& sink);
+
+    // Configure Virtual Display parameters such as the display surface
+    // and the buffer queue
+    void configureVirtualDisplay(int32_t &hwcDisplayId,
+            sp<DisplaySurface> &dispSurface,
+            sp<IGraphicBufferProducer> &producer,
+            const DisplayDeviceState state,
+            sp<IGraphicBufferProducer> bqProducer,
+            sp<IGraphicBufferConsumer> bqConsumer);
+
     /* handlePageFlip - latch a new buffer if available and compute the dirty
      * region. Returns whether a new buffer has been latched, i.e., whether it
      * is necessary to perform a refresh during this vsync.
@@ -290,6 +321,10 @@ private:
             sp<Layer>* outLayer);
 
     status_t createDimLayer(const sp<Client>& client, const String8& name,
+            uint32_t w, uint32_t h, uint32_t flags, sp<IBinder>* outHandle,
+            sp<IGraphicBufferProducer>* outGbp, sp<Layer>* outLayer);
+
+    status_t createBlurLayer(const sp<Client>& client, const String8& name,
             uint32_t w, uint32_t h, uint32_t flags, sp<IBinder>* outHandle,
             sp<IGraphicBufferProducer>* outGbp, sp<Layer>* outLayer);
 
@@ -331,6 +366,15 @@ private:
             bool useIdentityTransform, Transform::orientation_flags rotation,
             bool useReadPixels);
 
+#ifdef USE_MHEAP_SCREENSHOT
+    status_t captureScreenImplCpuConsumerLocked(
+            const sp<const DisplayDevice>& hw,
+            sp<IMemoryHeap>* heap, uint32_t* width, uint32_t* height,
+            Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+            uint32_t minLayerZ, uint32_t maxLayerZ,
+            bool useIdentityTransform, Transform::orientation_flags rotation);
+#endif
+
     /* ------------------------------------------------------------------------
      * EGL
      */
@@ -344,7 +388,8 @@ private:
     void initializeDisplays();
 
     // Create an IBinder for a builtin display and add it to current state
-    void createBuiltinDisplayLocked(DisplayDevice::DisplayType type);
+    void createBuiltinDisplayLocked(DisplayDevice::DisplayType type,
+                                    bool secure);
 
     // NOTE: can only be called from the main thread or with mStateLock held
     sp<const DisplayDevice> getDisplayDevice(const wp<IBinder>& dpy) const {
@@ -373,7 +418,7 @@ private:
      * Compositing
      */
     void invalidateHwcGeometry();
-    static void computeVisibleRegions(
+    static void computeVisibleRegions(size_t dpy,
             const LayerVector& currentLayers, uint32_t layerStack,
             Region& dirtyRegion, Region& opaqueRegion);
 
@@ -472,6 +517,25 @@ private:
     nsecs_t mLastTransactionTime;
     bool mBootFinished;
 
+    // Set if the Gpu Tile render DR optimization enabled
+    bool mGpuTileRenderEnable;
+    bool mCanUseGpuTileRender;
+    Rect mUnionDirtyRect;
+    Rect mUnionDirtyRectPrev;
+    int mDRCount;
+
+#ifdef QCOM_BSP
+    // Set up the DirtyRect/flags for GPU Comp optimization if required.
+    void setUpTiledDr();
+    // Find out if GPU composition can use Dirtyregion optimization
+    // Get the union dirty rect to operate
+    bool computeTiledDr(const sp<const DisplayDevice>& hw);
+    enum {
+       GL_PRESERVE_NONE = 0,
+       GL_PRESERVE      = 1
+    };
+#endif
+
     // these are thread safe
     mutable MessageQueue mEventQueue;
     FrameTracker mAnimFrameTracker;
@@ -495,6 +559,20 @@ private:
 
     mat4 mColorMatrix;
     bool mHasColorMatrix;
+    FrameRateHelper mFrameRateHelper;
+
+    /*
+     * A number that increases on every new frame composition and screen capture.
+     * LayerBlur can speed up it's drawing by caching texture using this variable
+     * if multiple LayerBlur objects draw in one frame composition.
+     * In case of display mirroring, this variable should be increased on every display.
+     */
+    uint32_t mActiveFrameSequence;
+
+#ifdef QCOM_BSP
+    // Flag to disable external rotation animation feature.
+    bool mDisableExtAnimation;
+#endif
 };
 
 }; // namespace android
