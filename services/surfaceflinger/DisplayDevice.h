@@ -182,7 +182,6 @@ public:
     void eglSwapPreserved(bool status) const;
 #endif
 
-    int getHardwareOrientation();
 private:
     /*
      *  Constants, set during initialization
