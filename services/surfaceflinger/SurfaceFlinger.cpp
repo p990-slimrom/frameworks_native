@@ -31,6 +31,7 @@
 #endif
 
 #include <cutils/log.h>
+#include <cutils/iosched_policy.h>
 #include <cutils/properties.h>
 
 #include <binder/IPCThreadState.h>
@@ -503,6 +504,7 @@ void SurfaceFlinger::init() {
 
     mEventControlThread = new EventControlThread(this);
     mEventControlThread->run("EventControl", PRIORITY_URGENT_DISPLAY);
+    android_set_rt_ioprio(mEventControlThread->getTid(), 1);
 
     // set a fake vsync period if there is no HWComposer
     if (mHwc->initCheck() != NO_ERROR) {
@@ -2132,9 +2134,9 @@ void SurfaceFlinger::doDisplayComposition(const sp<const DisplayDevice>& hw,
         if (mDaltonize) {
             colorMatrix = colorMatrix * mDaltonizer();
         }
-        engine.beginGroup(colorMatrix);
+        mat4 oldMatrix = engine.setupColorTransform(colorMatrix);
         doComposeSurfaces(hw, dirtyRegion);
-        engine.endGroup();
+        engine.setupColorTransform(oldMatrix);
     }
 
     // update the swap region and clear the dirty region
