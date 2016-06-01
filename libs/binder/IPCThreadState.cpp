@@ -360,12 +360,18 @@ status_t IPCThreadState::clearLastError()
     mLastError = NO_ERROR;
     return err;
 }
-
+extern "C" pid_t _ZNK7android14IPCThreadState13getCallingPidEv(void *obj);
+extern "C" int _ZN7android14IPCThreadState13getCallingPidEv(void *obj) {
+ return _ZNK7android14IPCThreadState13getCallingPidEv(obj);
+}
 int IPCThreadState::getCallingPid() const
 {
     return mCallingPid;
 }
-
+extern "C" int _ZNK7android14IPCThreadState13getCallingUidEv(void *obj);
+extern "C" int _ZN7android14IPCThreadState13getCallingUidEv(void *obj) {
+ return _ZNK7android14IPCThreadState13getCallingUidEv(obj);
+}
 int IPCThreadState::getCallingUid() const
 {
     return mCallingUid;
